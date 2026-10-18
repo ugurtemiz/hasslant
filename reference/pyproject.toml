@@ -1,0 +1,75 @@
+[project]
+name = "mypyllant-component"
+version = "0.9.19"
+readme = "README.md"
+requires-python = ">=3.14.2"
+dependencies = [
+    "myPyllant==0.9.18",
+    "requests>=2.32.0",
+]
+
+[dependency-groups]
+dev = [
+    { include-group = "lint" },
+    { include-group = "test" },
+]
+
+test = [
+    "aioresponses~=0.7.8",
+    "croniter~=6.2.2",
+    "polyfactory~=3.3.0",
+    "PyYAML~=6.0.1",
+    # Need specific versions
+    "pytest-homeassistant-custom-component==0.13.338",
+    # Versions handled by pytest-homeassistant-custom-component
+    "freezegun",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+]
+
+lint = [
+    "mypy~=2.1.0",
+    "prek~=0.4.4",
+    "ruff~=0.15.17",
+    "types-PyYAML~=6.0.12.20240311",
+]
+
+
+[tool.coverage.run]
+source = ["custom_components"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplemented()",
+    "if __name__ == '__main__':",
+    "main()",
+]
+show_missing = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [".git"]
+addopts = """
+-n4
+--strict-markers
+--cov=custom_components"""
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore:Inheritance class CountingClientSession from ClientSession is discouraged:DeprecationWarning",
+    "ignore:'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16:DeprecationWarning",
+]
+
+[tool.mypy]
+python_version = "3.14"
+pretty = true
+follow_imports = "silent"
+ignore_missing_imports = true
+warn_incomplete_stub = true
+warn_redundant_casts = true
+warn_unused_configs = true
+
+[tool.ruff.lint.pycodestyle]
+max-line-length = 80

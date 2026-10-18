@@ -10,6 +10,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from homeassistant.config_entries import SOURCE_USER
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import entity_registry as er
 from homeassistant.loader import async_get_integration
@@ -350,3 +351,149 @@ async def test_reading_is_energy_in_kilowatt_hours_without_hourly_statistics(
     assert state.attributes["device_class"] == "energy"
     assert "state_class" not in state.attributes
     assert write_statistics.call_count == 0
+
+
+async def test_hour_still_in_progress_is_left_out_even_with_a_number(hass, freezer):
+    """At 14:20 the 14:00 hour has not ended, so its watt-hours are not in the day total."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    closed = midnight + timedelta(hours=13)
+    in_progress = midnight + timedelta(hours=14)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(closed, closed + hour, 1540),
+                    _bucket(in_progress, in_progress + hour, 9000),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[_home([primary])]))
+
+    state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
+    assert state.state == "1.540"
+
+
+async def test_empty_closed_hour_adds_nothing_and_other_hours_still_count(
+    hass, freezer
+):
+    """A hole in one closed hour does not drop the hours that have watt-hours."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(midnight, midnight + hour, 600),
+                    _bucket(midnight + hour, midnight + timedelta(hours=2), None),
+                    _bucket(
+                        midnight + timedelta(hours=2),
+                        midnight + timedelta(hours=3),
+                        940,
+                    ),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[_home([primary])]))
+
+    state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
+    assert state.state == "1.540"
+
+
+async def test_explicit_zero_closed_hour_is_a_day_total_of_zero(hass, freezer):
+    """A heat generator that did not run shows 0.000 once that hour has closed."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 0)])],
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[_home([primary])]))
+
+    state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
+    assert state.state == "0.000"
+
+
+async def test_reading_is_unavailable_when_every_closed_hour_is_empty(hass, freezer):
+    """Missing figures are not shown as zero, even if the hour in progress has a number."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    in_progress = midnight + timedelta(hours=14)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(midnight, midnight + hour, None),
+                    _bucket(midnight + hour, midnight + timedelta(hours=2), None),
+                    _bucket(in_progress, in_progress + hour, 1540),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[_home([primary])]))
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.state == STATE_UNAVAILABLE
+
+
+async def test_reading_exists_and_is_unavailable_before_any_closed_hour_has_a_figure(
+    hass, freezer
+):
+    """The entity is there as soon as the series exists, and stays unavailable until a closed hour has a figure."""
+    freezer.move_to("2026-10-18T00:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [_bucket(midnight, midnight + hour, 1540)],
+            )
+        ],
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[_home([primary])]))
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.name == "Oak House Consumed electrical energy heating"
+    assert state.state == STATE_UNAVAILABLE
+
+
+async def test_no_reading_when_no_heat_generator_lists_heating_electricity(
+    hass, freezer
+):
+    """A companion device's heating series does not invent a reading the heat generator cannot fill."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _series(
+                "HEATING",
+                "HEAT_GENERATED",
+                [_bucket(midnight, midnight + hour, 8000)],
+            )
+        ],
+    )
+    companion = _device(
+        "electric_backup_heater",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([companion, primary])])
+    )
+
+    assert _hasslant_entities(hass) == []

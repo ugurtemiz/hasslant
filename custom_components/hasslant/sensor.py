@@ -48,6 +48,11 @@ class HeatingDayTotalSensor(CoordinatorEntity[HeatingDataCoordinator], SensorEnt
         )
 
     @property
+    def available(self) -> bool:
+        """A series with no day total is unavailable, not an unknown number."""
+        return super().available and self.native_value is not None
+
+    @property
     def native_value(self):
         for home in self.coordinator.data:
             if home["system_id"] == self._system_id:

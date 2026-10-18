@@ -4,7 +4,7 @@ A stand-in myVAILLANT account supplies homes and hourly buckets. The only
 observable is the heating reading, plus whether a setup was created.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -851,6 +851,105 @@ async def test_each_home_refreshes_fifteen_minutes_after_its_own_hour_closes(
     }
 
     _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 15, 15, tzinfo=berlin))
+    await hass.async_block_till_done()
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.500",
+        "Pine Cottage Consumed electrical energy heating": "2.300",
+    }
+
+
+@pytest.mark.freeze_time("2026-10-18T14:20:00+00:00")
+async def test_quarter_past_publishes_only_the_home_whose_hour_just_closed(
+    hass, freezer
+):
+    """At 15:15 on the first home it is 15:05 on the second.
+
+    The second home's hour has closed, and its own quarter-past has not
+    arrived, so its day total stays put. It updates at its own 15:15.
+    Startup still loads both homes.
+    """
+    await hass.config.async_set_time_zone("America/New_York")
+    first_tz = timezone(timedelta(0))
+    second_tz = timezone(timedelta(minutes=-10))
+    first_midnight = datetime(2026, 10, 18, tzinfo=first_tz)
+    second_midnight = datetime(2026, 10, 18, tzinfo=second_tz)
+    oak = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [
+                    _heating_electricity(
+                        [
+                            _bucket(
+                                first_midnight + timedelta(hours=13),
+                                first_midnight + timedelta(hours=14),
+                                1000,
+                            ),
+                            _bucket(
+                                first_midnight + timedelta(hours=14),
+                                first_midnight + timedelta(hours=15),
+                                500,
+                            ),
+                        ]
+                    )
+                ],
+            )
+        ],
+        name="Oak House",
+        system_id="home-oak",
+        timezone=first_tz,
+    )
+    pine = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [
+                    _heating_electricity(
+                        [
+                            _bucket(
+                                second_midnight + timedelta(hours=13),
+                                second_midnight + timedelta(hours=14),
+                                2000,
+                            ),
+                            _bucket(
+                                second_midnight + timedelta(hours=14),
+                                second_midnight + timedelta(hours=15),
+                                300,
+                            ),
+                        ]
+                    )
+                ],
+            )
+        ],
+        name="Pine Cottage",
+        system_id="home-pine",
+        timezone=second_tz,
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[oak, pine]))
+
+    def readings():
+        return {
+            hass.states.get(entity.entity_id).name: hass.states.get(
+                entity.entity_id
+            ).state
+            for entity in _hasslant_entities(hass)
+        }
+
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.000",
+        "Pine Cottage Consumed electrical energy heating": "2.000",
+    }
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 15, 15, tzinfo=first_tz))
+    await hass.async_block_till_done()
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.500",
+        "Pine Cottage Consumed electrical energy heating": "2.000",
+    }
+
+    _advance_home_clock(
+        hass, freezer, datetime(2026, 10, 18, 15, 15, tzinfo=second_tz)
+    )
     await hass.async_block_till_done()
     assert readings() == {
         "Oak House Consumed electrical energy heating": "1.500",

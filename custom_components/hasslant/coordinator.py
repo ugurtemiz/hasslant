@@ -23,7 +23,6 @@ CONSUMED_ELECTRICAL_ENERGY = "CONSUMED_ELECTRICAL_ENERGY"
 _HEAT_GENERATOR_TYPES = frozenset(
     {
         "primary_heat_generator",
-        "secondary_heat_generator",
         "secondary_heat_generators",
     }
 )

@@ -979,7 +979,7 @@ async def test_secondary_heat_generator_is_added_into_the_homes_day_total(
         [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, 460)])],
     )
     await _add_hasslant(
@@ -1003,7 +1003,7 @@ async def test_empty_secondary_does_not_hide_a_primary_with_figures(hass, freeze
         [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [
             _heating_electricity(
                 [
@@ -1033,7 +1033,7 @@ async def test_companion_heating_series_is_left_out_whether_zero_or_not(
         [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, 460)])],
     )
     companion = _device(
@@ -1071,7 +1071,7 @@ async def test_explicit_zeros_across_heat_generators_are_a_day_total_of_zero(
         [_heating_electricity([_bucket(midnight, midnight + hour, 0)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [
             _heating_electricity(
                 [
@@ -1109,7 +1109,7 @@ async def test_reading_is_unavailable_when_every_heat_generators_closed_hours_ar
         ],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [
             _heating_electricity(
                 [_bucket(midnight + hour, midnight + timedelta(hours=2), None)]
@@ -1158,7 +1158,7 @@ async def test_secondary_heat_generator_alone_still_has_one_reading(hass, freeze
     midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
     hour = timedelta(hours=1)
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
     )
     companion = _device(
@@ -1188,7 +1188,7 @@ async def test_explicit_zero_on_one_heat_generator_counts_when_the_other_is_empt
         [_heating_electricity([_bucket(midnight, midnight + hour, 0)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, None)])],
     )
     await _add_hasslant(
@@ -1211,7 +1211,7 @@ async def test_heat_generator_watt_hours_are_rounded_once_on_the_day_total(
         [_heating_electricity([_bucket(midnight, midnight + hour, 600.4)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, 0.4)])],
     )
     await _add_hasslant(

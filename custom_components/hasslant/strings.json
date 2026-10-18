@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "myVAILLANT account",
+        "description": "Sign in with the email, password, country, and brand from the myVAILLANT app.",
+        "data": {
+          "email": "Email",
+          "password": "[%key:common::config_flow::data::password%]",
+          "country": "Country",
+          "brand": "Brand"
+        }
+      }
+    },
+    "error": {
+      "authentication_failed": "Those credentials were rejected.",
+      "unknown": "Unexpected error"
+    }
+  }
+}

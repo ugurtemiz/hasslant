@@ -9,6 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.data_entry_flow import FlowResultType
@@ -35,6 +38,7 @@ class MyVaillantAccount:
         self.reject = reject
         self.homes = list(homes)
         self.fetches = []
+        self.fail_refresh = False
 
     def __call__(self, username, password, brand, country=None):
         return _Client(self, username, password, brand, country)
@@ -56,6 +60,8 @@ class _Client:
         return None
 
     async def get_systems(self):
+        if self.account.fail_refresh:
+            raise TimeoutError("refresh failed")
         for home in self.account.homes:
             yield home
 
@@ -101,10 +107,10 @@ def _device(device_type, series):
     return SimpleNamespace(type=device_type, data=list(series))
 
 
-def _home(devices, *, name=HOME_NAME, system_id=HOME_ID):
+def _home(devices, *, name=HOME_NAME, system_id=HOME_ID, timezone=HOME_TZ):
     return SimpleNamespace(
         id=system_id,
-        timezone=HOME_TZ,
+        timezone=timezone,
         home=SimpleNamespace(home_name=name, nomenclature=name),
         devices=list(devices),
     )
@@ -140,6 +146,12 @@ async def _add_hasslant(hass, account: MyVaillantAccount):
 def _hasslant_entities(hass):
     registry = er.async_get(hass)
     return [entry for entry in registry.entities.values() if entry.platform == DOMAIN]
+
+
+def _advance_home_clock(hass, freezer, moment: datetime) -> None:
+    """Move the frozen clock, then fire Home Assistant timers for that moment."""
+    freezer.move_to(moment)
+    async_fire_time_changed(hass)
 
 
 async def test_valid_myvaillant_account_creates_a_hasslant_setup(hass):
@@ -469,6 +481,245 @@ async def test_reading_exists_and_is_unavailable_before_any_closed_hour_has_a_fi
     state = hass.states.get(entities[0].entity_id)
     assert state.name == "Oak House Consumed electrical energy heating"
     assert state.state == STATE_UNAVAILABLE
+
+
+@pytest.mark.freeze_time("2026-10-18T23:50:00+02:00")
+async def test_midnight_on_the_home_clock_withdraws_the_previous_day_total(
+    hass, freezer
+):
+    """Yesterday's day total disappears at midnight in the home's timezone.
+
+    Home Assistant is on New York time, where this midnight is still the previous afternoon.
+    """
+    await hass.config.async_set_time_zone("America/New_York")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + timedelta(hours=1), 1540)])],
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[_home([primary])]))
+    entity_id = _hasslant_entities(hass)[0].entity_id
+    assert hass.states.get(entity_id).state == "1.540"
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 19, tzinfo=HOME_TZ))
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+
+@pytest.mark.freeze_time("2026-10-18T00:20:00+05:30")
+async def test_refresh_fifteen_minutes_after_the_first_hour_closes_publishes_it(
+    hass, freezer
+):
+    """The first closed hour becomes the day total at 01:15 on the home's clock.
+
+    Home Assistant is on New York time, whose quarter-hour is not this home's.
+    The hour in progress already has a number and stays out of the day total.
+    """
+    await hass.config.async_set_time_zone("America/New_York")
+    home_tz = ZoneInfo("Asia/Kolkata")
+    midnight = datetime(2026, 10, 18, tzinfo=home_tz)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(midnight, midnight + hour, 1540),
+                    _bucket(midnight + hour, midnight + timedelta(hours=2), 9000),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary], timezone=home_tz)])
+    )
+    entity_id = _hasslant_entities(hass)[0].entity_id
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 1, 0, tzinfo=home_tz))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 1, 15, tzinfo=home_tz))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "1.540"
+
+
+@pytest.mark.freeze_time("2026-10-18T23:50:00+05:30")
+async def test_quarter_past_midnight_stays_unavailable_until_the_first_hour_closes(
+    hass, freezer
+):
+    """The 00:15 refresh does not publish the hour that is still in progress."""
+    await hass.config.async_set_time_zone("America/New_York")
+    home_tz = ZoneInfo("Asia/Kolkata")
+    yesterday = datetime(2026, 10, 18, tzinfo=home_tz)
+    today = datetime(2026, 10, 19, tzinfo=home_tz)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(yesterday, yesterday + hour, 1540),
+                    _bucket(today, today + hour, 2000),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary], timezone=home_tz)])
+    )
+    entity_id = _hasslant_entities(hass)[0].entity_id
+    assert hass.states.get(entity_id).state == "1.540"
+
+    _advance_home_clock(hass, freezer, today)
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 19, 0, 15, tzinfo=home_tz))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+
+@pytest.mark.freeze_time("2026-10-18T00:20:00+05:30")
+async def test_later_closed_hour_is_included_fifteen_minutes_after_it_closes(
+    hass, freezer
+):
+    """A closed hour joins the day total on the refresh after it closes, not before."""
+    await hass.config.async_set_time_zone("America/New_York")
+    home_tz = ZoneInfo("Asia/Kolkata")
+    midnight = datetime(2026, 10, 18, tzinfo=home_tz)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(midnight, midnight + hour, 1540),
+                    _bucket(midnight + hour, midnight + timedelta(hours=2), 460),
+                    _bucket(
+                        midnight + timedelta(hours=2),
+                        midnight + timedelta(hours=3),
+                        9000,
+                    ),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary], timezone=home_tz)])
+    )
+    entity_id = _hasslant_entities(hass)[0].entity_id
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 1, 15, tzinfo=home_tz))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "1.540"
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 2, 0, tzinfo=home_tz))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "1.540"
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 2, 15, tzinfo=home_tz))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "2.000"
+
+
+@pytest.mark.freeze_time("2026-10-18T14:20:00+02:00")
+async def test_failed_refresh_keeps_the_day_total_already_showing_today(
+    hass, freezer
+):
+    """A quota error or a timeout does not wipe today's day total."""
+    await hass.config.async_set_time_zone("America/New_York")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    closed = midnight + timedelta(hours=13)
+    in_progress = midnight + timedelta(hours=14)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(closed, closed + hour, 1540),
+                    _bucket(in_progress, in_progress + hour, 500),
+                ]
+            )
+        ],
+    )
+    account = MyVaillantAccount(homes=[_home([primary])])
+    await _add_hasslant(hass, account)
+    entity_id = _hasslant_entities(hass)[0].entity_id
+    assert hass.states.get(entity_id).state == "1.540"
+
+    account.fail_refresh = True
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 15, 15, tzinfo=HOME_TZ))
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "1.540"
+
+
+@pytest.mark.freeze_time("2026-10-18T23:50:00+02:00")
+async def test_failed_refresh_after_midnight_does_not_keep_yesterdays_day_total(
+    hass, freezer
+):
+    """Yesterday's day total is not carried into the new day when the fetch fails."""
+    await hass.config.async_set_time_zone("America/New_York")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [_bucket(midnight, midnight + timedelta(hours=1), 1540)]
+            )
+        ],
+    )
+    account = MyVaillantAccount(homes=[_home([primary])])
+    await _add_hasslant(hass, account)
+    entity_id = _hasslant_entities(hass)[0].entity_id
+    assert hass.states.get(entity_id).state == "1.540"
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 19, tzinfo=HOME_TZ))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+    account.fail_refresh = True
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 19, 0, 15, tzinfo=HOME_TZ))
+    await hass.async_block_till_done()
+
+    assert [entry.entity_id for entry in _hasslant_entities(hass)] == [entity_id]
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+
+
+@pytest.mark.freeze_time("2026-10-18T23:50:00+02:00")
+async def test_the_next_midnight_withdraws_the_new_days_total(hass, freezer):
+    """Midnight withdrawal keeps following the home's clock after the first night."""
+    await hass.config.async_set_time_zone("America/New_York")
+    first_day = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    second_day = datetime(2026, 10, 19, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(first_day, first_day + hour, 1540),
+                    _bucket(second_day, second_day + hour, 460),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[_home([primary])]))
+    entity_id = _hasslant_entities(hass)[0].entity_id
+
+    _advance_home_clock(hass, freezer, second_day)
+    await hass.async_block_till_done()
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 19, 1, 15, tzinfo=HOME_TZ))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "0.460"
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 20, tzinfo=HOME_TZ))
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
 
 
 async def test_no_reading_when_no_heat_generator_lists_heating_electricity(

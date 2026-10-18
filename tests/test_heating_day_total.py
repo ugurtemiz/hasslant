@@ -80,10 +80,11 @@ class _Client:
                     "end": end,
                 }
             )
+            # The buckets payload uses energyType. The catalog series that was
+            # requested still carries value_type, which the fetch log records.
             yield DeviceData(
                 operation_mode=series.operation_mode,
-                value_type=series.value_type,
-                total_consumption=series.total_consumption,
+                energy_type=series.value_type,
                 data=list(series.fetched_buckets),
             )
 

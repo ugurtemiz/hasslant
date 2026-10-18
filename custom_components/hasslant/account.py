@@ -26,5 +26,8 @@ class _Account:
         if session is not None and not session.closed:
             await session.close()
 
-    def __getattr__(self, name: str):
-        return getattr(self._api, name)
+    def get_systems(self):
+        return self._api.get_systems()
+
+    def get_data_by_device(self, device, resolution, start, end):
+        return self._api.get_data_by_device(device, resolution, start, end)

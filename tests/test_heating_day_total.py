@@ -858,14 +858,17 @@ async def test_each_home_refreshes_fifteen_minutes_after_its_own_hour_closes(
     }
 
 
-@pytest.mark.freeze_time("2026-10-18T14:20:00+00:00")
+@pytest.mark.freeze_time("2026-10-18T14:30:00+00:00")
 async def test_quarter_past_publishes_only_the_home_whose_hour_just_closed(
     hass, freezer
 ):
     """At 15:15 on the first home it is 15:05 on the second.
 
-    The second home's hour has closed, and its own quarter-past has not
-    arrived, so its day total stays put. It updates at its own 15:15.
+    The clocks are ten minutes apart. Startup is 14:30 and 14:20, so the
+    second home is already past its 14:15 and its next quarter-past is 15:15.
+    Advancing to the first home's 15:15 publishes that home's newly closed
+    hour. The second home's hour has closed, and its own quarter-past has
+    not arrived, so its day total stays put until its own 15:15.
     Startup still loads both homes.
     """
     await hass.config.async_set_time_zone("America/New_York")

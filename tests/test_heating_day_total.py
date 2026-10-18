@@ -722,6 +722,432 @@ async def test_the_next_midnight_withdraws_the_new_days_total(hass, freezer):
     assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
 
 
+async def test_several_homes_produce_one_reading_each_named_for_that_home(
+    hass, freezer
+):
+    """Each dwelling on the account has its own day total, named for that home."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    oak = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
+            )
+        ],
+        name="Oak House",
+        system_id="home-oak",
+    )
+    pine = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [_heating_electricity([_bucket(midnight, midnight + hour, 460)])],
+            )
+        ],
+        name="Pine Cottage",
+        system_id="home-pine",
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[oak, pine]))
+
+    readings = {
+        hass.states.get(entity.entity_id).name: hass.states.get(entity.entity_id).state
+        for entity in _hasslant_entities(hass)
+    }
+    assert readings == {
+        "Oak House Consumed electrical energy heating": "1.540",
+        "Pine Cottage Consumed electrical energy heating": "0.460",
+    }
+
+
+@pytest.mark.freeze_time("2026-10-18T14:20:00+02:00")
+async def test_each_home_refreshes_fifteen_minutes_after_its_own_hour_closes(
+    hass, freezer
+):
+    """A home moves at its own quarter-past, not when another home's hour closes.
+
+    At 18:15 in Kolkata it is still 14:45 in Berlin, so only Pine Cottage's
+    newly closed hour is in the day total. Oak House waits until 15:15 Berlin.
+    """
+    await hass.config.async_set_time_zone("America/New_York")
+    berlin = HOME_TZ
+    kolkata = ZoneInfo("Asia/Kolkata")
+    oak_midnight = datetime(2026, 10, 18, tzinfo=berlin)
+    pine_midnight = datetime(2026, 10, 18, tzinfo=kolkata)
+    oak = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [
+                    _heating_electricity(
+                        [
+                            _bucket(
+                                oak_midnight + timedelta(hours=13),
+                                oak_midnight + timedelta(hours=14),
+                                1000,
+                            ),
+                            _bucket(
+                                oak_midnight + timedelta(hours=14),
+                                oak_midnight + timedelta(hours=15),
+                                500,
+                            ),
+                        ]
+                    )
+                ],
+            )
+        ],
+        name="Oak House",
+        system_id="home-oak",
+        timezone=berlin,
+    )
+    pine = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [
+                    _heating_electricity(
+                        [
+                            _bucket(
+                                pine_midnight + timedelta(hours=16),
+                                pine_midnight + timedelta(hours=17),
+                                2000,
+                            ),
+                            _bucket(
+                                pine_midnight + timedelta(hours=17),
+                                pine_midnight + timedelta(hours=18),
+                                300,
+                            ),
+                        ]
+                    )
+                ],
+            )
+        ],
+        name="Pine Cottage",
+        system_id="home-pine",
+        timezone=kolkata,
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[oak, pine]))
+
+    def readings():
+        return {
+            hass.states.get(entity.entity_id).name: hass.states.get(
+                entity.entity_id
+            ).state
+            for entity in _hasslant_entities(hass)
+        }
+
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.000",
+        "Pine Cottage Consumed electrical energy heating": "2.000",
+    }
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 18, 15, tzinfo=kolkata))
+    await hass.async_block_till_done()
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.000",
+        "Pine Cottage Consumed electrical energy heating": "2.300",
+    }
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 15, 15, tzinfo=berlin))
+    await hass.async_block_till_done()
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.500",
+        "Pine Cottage Consumed electrical energy heating": "2.300",
+    }
+
+
+async def test_secondary_heat_generator_is_added_into_the_homes_day_total(
+    hass, freezer
+):
+    """1540 Wh on the primary plus 460 Wh on the secondary is 2.000 kWh."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
+    )
+    secondary = _device(
+        "secondary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 460)])],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary, secondary])])
+    )
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.name == "Oak House Consumed electrical energy heating"
+    assert state.state == "2.000"
+
+
+async def test_empty_secondary_does_not_hide_a_primary_with_figures(hass, freezer):
+    """A secondary whose closed hours are empty adds nothing and leaves the primary."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
+    )
+    secondary = _device(
+        "secondary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(midnight, midnight + hour, None),
+                    _bucket(midnight + hour, midnight + timedelta(hours=2), None),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([secondary, primary])])
+    )
+
+    state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
+    assert state.state == "1.540"
+
+
+async def test_companion_heating_series_is_left_out_whether_zero_or_not(
+    hass, freezer
+):
+    """A companion's zero hour and its non-zero hour stay out of the home's day total."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
+    )
+    secondary = _device(
+        "secondary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 460)])],
+    )
+    companion = _device(
+        "electric_backup_heater",
+        [
+            _heating_electricity(
+                [
+                    _bucket(midnight, midnight + hour, 0),
+                    _bucket(midnight + hour, midnight + timedelta(hours=2), 5000),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(
+        hass,
+        MyVaillantAccount(homes=[_home([companion, secondary, primary])]),
+    )
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.name == "Oak House Consumed electrical energy heating"
+    assert state.state == "2.000"
+
+
+async def test_explicit_zeros_across_heat_generators_are_a_day_total_of_zero(
+    hass, freezer
+):
+    """A quiet day on every heat generator is 0.000, not a missing reading."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 0)])],
+    )
+    secondary = _device(
+        "secondary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(midnight, midnight + hour, 0),
+                    _bucket(midnight + hour, midnight + timedelta(hours=2), 0),
+                ]
+            )
+        ],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary, secondary])])
+    )
+
+    state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
+    assert state.state == "0.000"
+
+
+async def test_reading_is_unavailable_when_every_heat_generators_closed_hours_are_empty(
+    hass, freezer
+):
+    """The reading is unavailable when neither heat generator has a figure on a closed hour."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    in_progress = midnight + timedelta(hours=14)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(midnight, midnight + hour, None),
+                    _bucket(in_progress, in_progress + hour, 1540),
+                ]
+            )
+        ],
+    )
+    secondary = _device(
+        "secondary_heat_generator",
+        [
+            _heating_electricity(
+                [_bucket(midnight + hour, midnight + timedelta(hours=2), None)]
+            )
+        ],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary, secondary])])
+    )
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.state == STATE_UNAVAILABLE
+
+
+async def test_account_secondary_heat_generator_list_is_added_into_the_day_total(
+    hass, freezer
+):
+    """myPyllant marks each secondary with the payload key secondary_heat_generators.
+
+    1540 Wh on the primary plus 460 Wh on that secondary is 2.000 kWh.
+    """
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
+    )
+    secondary = _device(
+        "secondary_heat_generators",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 460)])],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary, secondary])])
+    )
+
+    state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
+    assert state.state == "2.000"
+
+
+async def test_secondary_heat_generator_alone_still_has_one_reading(hass, freezer):
+    """A home with no primary still has a day total from its secondary heat generator."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    secondary = _device(
+        "secondary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
+    )
+    companion = _device(
+        "electric_backup_heater",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 5000)])],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([companion, secondary])])
+    )
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.name == "Oak House Consumed electrical energy heating"
+    assert state.state == "1.540"
+
+
+async def test_explicit_zero_on_one_heat_generator_counts_when_the_other_is_empty(
+    hass, freezer
+):
+    """An explicit 0 Wh is a figure, so the reading is 0.000 while the other machine is empty."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 0)])],
+    )
+    secondary = _device(
+        "secondary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, None)])],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary, secondary])])
+    )
+
+    state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
+    assert state.state == "0.000"
+
+
+async def test_heat_generator_watt_hours_are_rounded_once_on_the_day_total(
+    hass, freezer
+):
+    """600.4 Wh and 0.4 Wh are 600.8 Wh, which is 0.601 kWh after one rounding."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    primary = _device(
+        "primary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 600.4)])],
+    )
+    secondary = _device(
+        "secondary_heat_generator",
+        [_heating_electricity([_bucket(midnight, midnight + hour, 0.4)])],
+    )
+    await _add_hasslant(
+        hass, MyVaillantAccount(homes=[_home([primary, secondary])])
+    )
+
+    state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
+    assert state.state == "0.601"
+
+
+async def test_a_home_without_a_heat_generator_has_no_reading_beside_one_that_does(
+    hass, freezer
+):
+    """Only the home with a heating-electricity series gets a reading."""
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    oak = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
+            )
+        ],
+        name="Oak House",
+        system_id="home-oak",
+    )
+    pine = _home(
+        [
+            _device(
+                "electric_backup_heater",
+                [_heating_electricity([_bucket(midnight, midnight + hour, 5000)])],
+            )
+        ],
+        name="Pine Cottage",
+        system_id="home-pine",
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[oak, pine]))
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.name == "Oak House Consumed electrical energy heating"
+    assert state.state == "1.540"
+
+
 async def test_no_reading_when_no_heat_generator_lists_heating_electricity(
     hass, freezer
 ):

@@ -18,6 +18,15 @@ _LOGGER = logging.getLogger(__name__)
 
 HEATING = "HEATING"
 CONSUMED_ELECTRICAL_ENERGY = "CONSUMED_ELECTRICAL_ENERGY"
+# myPyllant copies the system payload key onto Device.type. A secondary heat
+# generator arrives as the plural key, not the singular domain name.
+_HEAT_GENERATOR_TYPES = frozenset(
+    {
+        "primary_heat_generator",
+        "secondary_heat_generator",
+        "secondary_heat_generators",
+    }
+)
 _KILOWATT_HOUR = Decimal("0.001")
 
 
@@ -143,37 +152,36 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     async def _fetch_homes(self) -> list[dict[str, Any]]:
         homes: list[dict[str, Any]] = []
         async for system in self.api.get_systems():
-            primary = next(
-                (
-                    device
-                    for device in system.devices
-                    if device.type == "primary_heat_generator"
-                ),
-                None,
-            )
-            if primary is None or not any(
-                _is_heating_electricity(series) for series in primary.data
-            ):
+            heat_generators = [
+                device
+                for device in system.devices
+                if device.type in _HEAT_GENERATOR_TYPES
+                and any(
+                    _is_heating_electricity(series) for series in device.data
+                )
+            ]
+            if not heat_generators:
                 continue
-            for series in primary.data:
-                series.skip_data_update = not _is_heating_electricity(series)
             now = datetime.now(system.timezone)
             start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             end = start + timedelta(days=1)
             watt_hours: list[float] = []
-            async for series in self.api.get_data_by_device(
-                primary, DeviceDataBucketResolution.HOUR, start, end
-            ):
-                if not _is_heating_electricity(series):
-                    continue
-                for bucket in series.data:
-                    if (
-                        bucket.value is None
-                        or bucket.end_date <= start
-                        or bucket.end_date > now
-                    ):
+            for heat_generator in heat_generators:
+                for series in heat_generator.data:
+                    series.skip_data_update = not _is_heating_electricity(series)
+                async for series in self.api.get_data_by_device(
+                    heat_generator, DeviceDataBucketResolution.HOUR, start, end
+                ):
+                    if not _is_heating_electricity(series):
                         continue
-                    watt_hours.append(bucket.value)
+                    for bucket in series.data:
+                        if (
+                            bucket.value is None
+                            or bucket.end_date <= start
+                            or bucket.end_date > now
+                        ):
+                            continue
+                        watt_hours.append(bucket.value)
             home_name = system.home.home_name or system.home.nomenclature
             homes.append(
                 {

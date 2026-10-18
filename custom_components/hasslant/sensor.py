@@ -5,7 +5,7 @@ from __future__ import annotations
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -19,13 +19,26 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create one heating reading per home."""
+    """Create one heating reading per home, including homes that appear later."""
     coordinator: HeatingDataCoordinator = hass.data[DOMAIN][entry.entry_id][
         "coordinator"
     ]
-    async_add_entities(
-        HeatingDayTotalSensor(coordinator, home) for home in coordinator.data
-    )
+    seen: set[str] = set()
+
+    @callback
+    def _add_new_homes() -> None:
+        fresh = []
+        for home in coordinator.data or ():
+            system_id = home["system_id"]
+            if system_id in seen:
+                continue
+            seen.add(system_id)
+            fresh.append(HeatingDayTotalSensor(coordinator, home))
+        if fresh:
+            async_add_entities(fresh)
+
+    coordinator.async_add_listener(_add_new_homes)
+    _add_new_homes()
 
 
 class HeatingDayTotalSensor(CoordinatorEntity[HeatingDataCoordinator], SensorEntity):

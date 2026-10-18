@@ -4,7 +4,7 @@ A stand-in myVAILLANT account supplies homes and hourly buckets. The only
 observable is the heating reading, plus whether a setup was created.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -80,10 +80,11 @@ class _Client:
                     "end": end,
                 }
             )
+            # The buckets payload uses energyType. The catalog series that was
+            # requested still carries value_type, which the fetch log records.
             yield DeviceData(
                 operation_mode=series.operation_mode,
-                value_type=series.value_type,
-                total_consumption=series.total_consumption,
+                energy_type=series.value_type,
                 data=list(series.fetched_buckets),
             )
 
@@ -152,6 +153,13 @@ def _advance_home_clock(hass, freezer, moment: datetime) -> None:
     """Move the frozen clock, then fire Home Assistant timers for that moment."""
     freezer.move_to(moment)
     async_fire_time_changed(hass)
+
+
+async def _refresh(hass) -> None:
+    """Run another fetch for the account already set up."""
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    await hass.data[DOMAIN][entry.entry_id]["coordinator"].async_refresh()
+    await hass.async_block_till_done()
 
 
 async def test_valid_myvaillant_account_creates_a_hasslant_setup(hass):
@@ -857,6 +865,108 @@ async def test_each_home_refreshes_fifteen_minutes_after_its_own_hour_closes(
     }
 
 
+@pytest.mark.freeze_time("2026-10-18T14:30:00+00:00")
+async def test_quarter_past_publishes_only_the_home_whose_hour_just_closed(
+    hass, freezer
+):
+    """At 15:15 on the first home it is 15:05 on the second.
+
+    The clocks are ten minutes apart. Startup is 14:30 and 14:20, so the
+    second home is already past its 14:15 and its next quarter-past is 15:15.
+    Advancing to the first home's 15:15 publishes that home's newly closed
+    hour. The second home's hour has closed, and its own quarter-past has
+    not arrived, so its day total stays put until its own 15:15.
+    Startup still loads both homes.
+    """
+    await hass.config.async_set_time_zone("America/New_York")
+    first_tz = timezone(timedelta(0))
+    second_tz = timezone(timedelta(minutes=-10))
+    first_midnight = datetime(2026, 10, 18, tzinfo=first_tz)
+    second_midnight = datetime(2026, 10, 18, tzinfo=second_tz)
+    oak = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [
+                    _heating_electricity(
+                        [
+                            _bucket(
+                                first_midnight + timedelta(hours=13),
+                                first_midnight + timedelta(hours=14),
+                                1000,
+                            ),
+                            _bucket(
+                                first_midnight + timedelta(hours=14),
+                                first_midnight + timedelta(hours=15),
+                                500,
+                            ),
+                        ]
+                    )
+                ],
+            )
+        ],
+        name="Oak House",
+        system_id="home-oak",
+        timezone=first_tz,
+    )
+    pine = _home(
+        [
+            _device(
+                "primary_heat_generator",
+                [
+                    _heating_electricity(
+                        [
+                            _bucket(
+                                second_midnight + timedelta(hours=13),
+                                second_midnight + timedelta(hours=14),
+                                2000,
+                            ),
+                            _bucket(
+                                second_midnight + timedelta(hours=14),
+                                second_midnight + timedelta(hours=15),
+                                300,
+                            ),
+                        ]
+                    )
+                ],
+            )
+        ],
+        name="Pine Cottage",
+        system_id="home-pine",
+        timezone=second_tz,
+    )
+    await _add_hasslant(hass, MyVaillantAccount(homes=[oak, pine]))
+
+    def readings():
+        return {
+            hass.states.get(entity.entity_id).name: hass.states.get(
+                entity.entity_id
+            ).state
+            for entity in _hasslant_entities(hass)
+        }
+
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.000",
+        "Pine Cottage Consumed electrical energy heating": "2.000",
+    }
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 18, 15, 15, tzinfo=first_tz))
+    await hass.async_block_till_done()
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.500",
+        "Pine Cottage Consumed electrical energy heating": "2.000",
+    }
+
+    _advance_home_clock(
+        hass, freezer, datetime(2026, 10, 18, 15, 15, tzinfo=second_tz)
+    )
+    await hass.async_block_till_done()
+    assert readings() == {
+        "Oak House Consumed electrical energy heating": "1.500",
+        "Pine Cottage Consumed electrical energy heating": "2.300",
+    }
+
+
 async def test_secondary_heat_generator_is_added_into_the_homes_day_total(
     hass, freezer
 ):
@@ -869,7 +979,7 @@ async def test_secondary_heat_generator_is_added_into_the_homes_day_total(
         [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, 460)])],
     )
     await _add_hasslant(
@@ -893,7 +1003,7 @@ async def test_empty_secondary_does_not_hide_a_primary_with_figures(hass, freeze
         [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [
             _heating_electricity(
                 [
@@ -923,7 +1033,7 @@ async def test_companion_heating_series_is_left_out_whether_zero_or_not(
         [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, 460)])],
     )
     companion = _device(
@@ -961,7 +1071,7 @@ async def test_explicit_zeros_across_heat_generators_are_a_day_total_of_zero(
         [_heating_electricity([_bucket(midnight, midnight + hour, 0)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [
             _heating_electricity(
                 [
@@ -999,7 +1109,7 @@ async def test_reading_is_unavailable_when_every_heat_generators_closed_hours_ar
         ],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [
             _heating_electricity(
                 [_bucket(midnight + hour, midnight + timedelta(hours=2), None)]
@@ -1048,7 +1158,7 @@ async def test_secondary_heat_generator_alone_still_has_one_reading(hass, freeze
     midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
     hour = timedelta(hours=1)
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, 1540)])],
     )
     companion = _device(
@@ -1078,7 +1188,7 @@ async def test_explicit_zero_on_one_heat_generator_counts_when_the_other_is_empt
         [_heating_electricity([_bucket(midnight, midnight + hour, 0)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, None)])],
     )
     await _add_hasslant(
@@ -1101,7 +1211,7 @@ async def test_heat_generator_watt_hours_are_rounded_once_on_the_day_total(
         [_heating_electricity([_bucket(midnight, midnight + hour, 600.4)])],
     )
     secondary = _device(
-        "secondary_heat_generator",
+        "secondary_heat_generators",
         [_heating_electricity([_bucket(midnight, midnight + hour, 0.4)])],
     )
     await _add_hasslant(
@@ -1174,3 +1284,51 @@ async def test_no_reading_when_no_heat_generator_lists_heating_electricity(
     )
 
     assert _hasslant_entities(hass) == []
+
+
+async def test_reading_appears_when_a_heat_generator_gains_heating_electricity(
+    hass, freezer
+):
+    """No reading until a heat generator lists heating electricity.
+
+    The next refresh is the first time that series is there, and no closed
+    hour has a figure yet, so the reading exists and is unavailable. A failed
+    refresh does not remove it, and neither does a later refresh while the
+    series is still present.
+    """
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    in_progress = midnight + timedelta(hours=14)
+    primary = _device(
+        "primary_heat_generator",
+        [_series("HEATING", "HEAT_GENERATED")],
+    )
+    account = MyVaillantAccount(homes=[_home([primary])])
+    await _add_hasslant(hass, account)
+    assert _hasslant_entities(hass) == []
+
+    primary.data = [
+        _heating_electricity([_bucket(in_progress, in_progress + hour, 1540)])
+    ]
+    await _refresh(hass)
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.name == "Oak House Consumed electrical energy heating"
+    assert state.state == STATE_UNAVAILABLE
+
+    account.fail_refresh = True
+    await _refresh(hass)
+    assert [entity.entity_id for entity in _hasslant_entities(hass)] == [
+        entities[0].entity_id
+    ]
+    assert hass.states.get(entities[0].entity_id).state == STATE_UNAVAILABLE
+
+    account.fail_refresh = False
+    await _refresh(hass)
+    assert [entity.entity_id for entity in _hasslant_entities(hass)] == [
+        entities[0].entity_id
+    ]
+    assert hass.states.get(entities[0].entity_id).state == STATE_UNAVAILABLE

@@ -5,13 +5,13 @@ from __future__ import annotations
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import HeatingDataCoordinator
+from .coordinator import HeatingDataCoordinator, HomeReading
 
 
 async def async_setup_entry(
@@ -19,13 +19,25 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create one heating reading per home."""
+    """Create one heating reading per home, including homes that appear later."""
     coordinator: HeatingDataCoordinator = hass.data[DOMAIN][entry.entry_id][
         "coordinator"
     ]
-    async_add_entities(
-        HeatingDayTotalSensor(coordinator, home) for home in coordinator.data
-    )
+    seen: set[str] = set()
+
+    @callback
+    def _add_new_homes() -> None:
+        fresh = []
+        for home in coordinator.data or ():
+            if home.system_id in seen:
+                continue
+            seen.add(home.system_id)
+            fresh.append(HeatingDayTotalSensor(coordinator, home))
+        if fresh:
+            async_add_entities(fresh)
+
+    coordinator.async_add_listener(_add_new_homes)
+    _add_new_homes()
 
 
 class HeatingDayTotalSensor(CoordinatorEntity[HeatingDataCoordinator], SensorEntity):
@@ -38,13 +50,13 @@ class HeatingDayTotalSensor(CoordinatorEntity[HeatingDataCoordinator], SensorEnt
     _attr_suggested_display_precision = 3
     _attr_state_class = None
 
-    def __init__(self, coordinator: HeatingDataCoordinator, home: dict) -> None:
+    def __init__(self, coordinator: HeatingDataCoordinator, home: HomeReading) -> None:
         super().__init__(coordinator)
-        self._system_id = home["system_id"]
-        self._attr_unique_id = home["system_id"]
+        self._system_id = home.system_id
+        self._attr_unique_id = home.system_id
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, home["system_id"])},
-            name=home["home_name"],
+            identifiers={(DOMAIN, home.system_id)},
+            name=home.home_name,
         )
 
     @property
@@ -54,7 +66,13 @@ class HeatingDayTotalSensor(CoordinatorEntity[HeatingDataCoordinator], SensorEnt
 
     @property
     def native_value(self):
-        for home in self.coordinator.data:
-            if home["system_id"] == self._system_id:
-                return home["day_total"]
+        home = self._reading()
+        if home is None:
+            return None
+        return home.day_total
+
+    def _reading(self) -> HomeReading | None:
+        for home in self.coordinator.data or ():
+            if home.system_id == self._system_id:
+                return home
         return None

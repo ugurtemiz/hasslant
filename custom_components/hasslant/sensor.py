@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import HeatingDataCoordinator
+from .coordinator import HeatingDataCoordinator, HomeReading
 
 
 async def async_setup_entry(
@@ -29,10 +29,9 @@ async def async_setup_entry(
     def _add_new_homes() -> None:
         fresh = []
         for home in coordinator.data or ():
-            system_id = home["system_id"]
-            if system_id in seen:
+            if home.system_id in seen:
                 continue
-            seen.add(system_id)
+            seen.add(home.system_id)
             fresh.append(HeatingDayTotalSensor(coordinator, home))
         if fresh:
             async_add_entities(fresh)
@@ -51,13 +50,13 @@ class HeatingDayTotalSensor(CoordinatorEntity[HeatingDataCoordinator], SensorEnt
     _attr_suggested_display_precision = 3
     _attr_state_class = None
 
-    def __init__(self, coordinator: HeatingDataCoordinator, home: dict) -> None:
+    def __init__(self, coordinator: HeatingDataCoordinator, home: HomeReading) -> None:
         super().__init__(coordinator)
-        self._system_id = home["system_id"]
-        self._attr_unique_id = home["system_id"]
+        self._system_id = home.system_id
+        self._attr_unique_id = home.system_id
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, home["system_id"])},
-            name=home["home_name"],
+            identifiers={(DOMAIN, home.system_id)},
+            name=home.home_name,
         )
 
     @property
@@ -67,7 +66,13 @@ class HeatingDayTotalSensor(CoordinatorEntity[HeatingDataCoordinator], SensorEnt
 
     @property
     def native_value(self):
-        for home in self.coordinator.data:
-            if home["system_id"] == self._system_id:
-                return home["day_total"]
+        home = self._reading()
+        if home is None:
+            return None
+        return home.day_total
+
+    def _reading(self) -> HomeReading | None:
+        for home in self.coordinator.data or ():
+            if home.system_id == self._system_id:
+                return home
         return None

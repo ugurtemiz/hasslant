@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, tzinfo
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
@@ -27,6 +28,17 @@ _HEAT_GENERATOR_TYPES = frozenset(
     }
 )
 _KILOWATT_HOUR = Decimal("0.001")
+
+
+@dataclass(frozen=True, slots=True)
+class HomeReading:
+    """One home's heating day total for the current calendar day."""
+
+    system_id: str
+    home_name: str
+    day_total: Decimal | None
+    timezone: tzinfo
+    day: date
 
 
 def _is_heating_electricity(series) -> bool:
@@ -67,7 +79,7 @@ def _next_quarter_past(now: datetime) -> datetime:
     return candidate
 
 
-class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
+class HeatingDataCoordinator(DataUpdateCoordinator[list[HomeReading]]):
     """One myVAILLANT account's heating readings."""
 
     def __init__(self, hass: HomeAssistant, api) -> None:
@@ -118,35 +130,35 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """The calendar day changed, so yesterday's day total is no longer today's."""
         withdrawn = []
         for home in self.data:
-            if home["system_id"] == system_id:
+            if home.system_id == system_id:
                 withdrawn.append(
-                    {
-                        **home,
-                        "day_total": None,
-                        "day": datetime.now(home["timezone"]).date(),
-                    }
+                    replace(
+                        home,
+                        day_total=None,
+                        day=datetime.now(home.timezone).date(),
+                    )
                 )
             else:
                 withdrawn.append(home)
         self.async_set_updated_data(withdrawn)
 
-    def _schedule_home_clocks(self, homes: list[dict[str, Any]]) -> None:
+    def _schedule_home_clocks(self, homes: list[HomeReading]) -> None:
         for home in homes:
-            self._schedule_midnight(home["system_id"], home["timezone"])
-            self._schedule_quarter_past(home["system_id"], home["timezone"])
+            self._schedule_midnight(home.system_id, home.timezone)
+            self._schedule_quarter_past(home.system_id, home.timezone)
 
-    def _readings_after_failed_refresh(self) -> list[dict[str, Any]]:
+    def _readings_after_failed_refresh(self) -> list[HomeReading]:
         """Keep today's day total. A new calendar day has nothing to keep."""
         retained = []
         for home in self.data:
-            today = datetime.now(home["timezone"]).date()
-            if home["day"] == today and home["day_total"] is not None:
+            today = datetime.now(home.timezone).date()
+            if home.day == today and home.day_total is not None:
                 retained.append(home)
             else:
-                retained.append({**home, "day_total": None, "day": today})
+                retained.append(replace(home, day_total=None, day=today))
         return retained
 
-    async def _async_update_data(self) -> list[dict[str, Any]]:
+    async def _async_update_data(self) -> list[HomeReading]:
         try:
             homes = await self._fetch_homes()
         except Exception:
@@ -168,15 +180,15 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             fetched = [
                 home
                 for home in self._readings_after_failed_refresh()
-                if home["system_id"] == system_id
+                if home.system_id == system_id
             ]
         updated = next(
-            (home for home in fetched if home["system_id"] == system_id), None
+            (home for home in fetched if home.system_id == system_id), None
         )
-        merged: list[dict[str, Any]] = []
+        merged: list[HomeReading] = []
         found = False
         for home in self.data or []:
-            if home["system_id"] == system_id:
+            if home.system_id == system_id:
                 found = True
                 merged.append(updated if updated is not None else home)
             else:
@@ -185,16 +197,14 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             merged.append(updated)
         scheduled = updated
         if scheduled is None and found:
-            scheduled = next(
-                home for home in merged if home["system_id"] == system_id
-            )
+            scheduled = next(home for home in merged if home.system_id == system_id)
         if scheduled is not None:
-            self._schedule_midnight(scheduled["system_id"], scheduled["timezone"])
-            self._schedule_quarter_past(scheduled["system_id"], scheduled["timezone"])
+            self._schedule_midnight(scheduled.system_id, scheduled.timezone)
+            self._schedule_quarter_past(scheduled.system_id, scheduled.timezone)
         self.async_set_updated_data(merged)
 
-    async def _fetch_homes(self, system_id: str | None = None) -> list[dict[str, Any]]:
-        homes: list[dict[str, Any]] = []
+    async def _fetch_homes(self, system_id: str | None = None) -> list[HomeReading]:
+        homes: list[HomeReading] = []
         async for system in self.api.get_systems():
             if system_id is not None and system.id != system_id:
                 continue
@@ -230,14 +240,13 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         ):
                             continue
                         watt_hours.append(bucket.value)
-            home_name = system.home.home_name or system.home.nomenclature
             homes.append(
-                {
-                    "system_id": system.id,
-                    "home_name": home_name,
-                    "day_total": _kilowatt_hours(watt_hours),
-                    "timezone": system.timezone,
-                    "day": start.date(),
-                }
+                HomeReading(
+                    system_id=system.id,
+                    home_name=system.home.home_name or system.home.nomenclature,
+                    day_total=_kilowatt_hours(watt_hours),
+                    timezone=system.timezone,
+                    day=start.date(),
+                )
             )
         return homes

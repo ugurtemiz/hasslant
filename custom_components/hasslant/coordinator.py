@@ -108,7 +108,7 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         when = _next_quarter_past(datetime.now(timezone))
 
         async def _on_quarter_past(_utc_now: datetime) -> None:
-            await self.async_refresh()
+            await self._refresh_home(system_id)
 
         self._quarter_unsubs[system_id] = async_track_point_in_utc_time(
             self.hass, _on_quarter_past, when
@@ -158,9 +158,47 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._schedule_home_clocks(homes)
         return homes
 
-    async def _fetch_homes(self) -> list[dict[str, Any]]:
+    async def _refresh_home(self, system_id: str) -> None:
+        """Recompute one home. Other homes keep the day total they already show."""
+        try:
+            fetched = await self._fetch_homes(system_id)
+        except Exception:
+            _LOGGER.warning("Heating day total refresh failed", exc_info=True)
+            if not self.data:
+                return
+            fetched = [
+                home
+                for home in self._readings_after_failed_refresh()
+                if home["system_id"] == system_id
+            ]
+        updated = next(
+            (home for home in fetched if home["system_id"] == system_id), None
+        )
+        merged: list[dict[str, Any]] = []
+        found = False
+        for home in self.data or []:
+            if home["system_id"] == system_id:
+                found = True
+                merged.append(updated if updated is not None else home)
+            else:
+                merged.append(home)
+        if not found and updated is not None:
+            merged.append(updated)
+        scheduled = updated
+        if scheduled is None and found:
+            scheduled = next(
+                home for home in merged if home["system_id"] == system_id
+            )
+        if scheduled is not None:
+            self._schedule_midnight(scheduled["system_id"], scheduled["timezone"])
+            self._schedule_quarter_past(scheduled["system_id"], scheduled["timezone"])
+        self.async_set_updated_data(merged)
+
+    async def _fetch_homes(self, system_id: str | None = None) -> list[dict[str, Any]]:
         homes: list[dict[str, Any]] = []
         async for system in self.api.get_systems():
+            if system_id is not None and system.id != system_id:
+                continue
             heat_generators = [
                 device
                 for device in system.devices

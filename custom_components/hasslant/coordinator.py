@@ -31,6 +31,15 @@ _KILOWATT_HOUR = Decimal("0.001")
 
 
 def _is_heating_electricity(series) -> bool:
+    """Heating electricity, on the catalog (``value_type``) or buckets (``energy_type``)."""
+    return series.operation_mode == HEATING and (
+        getattr(series, "value_type", None) == CONSUMED_ELECTRICAL_ENERGY
+        or getattr(series, "energy_type", None) == CONSUMED_ELECTRICAL_ENERGY
+    )
+
+
+def _catalog_requests_heating_electricity(series) -> bool:
+    """The catalog series to request. ``skip_data_update`` follows ``value_type``."""
     return (
         series.operation_mode == HEATING
         and series.value_type == CONSUMED_ELECTRICAL_ENERGY
@@ -168,7 +177,9 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             watt_hours: list[float] = []
             for heat_generator in heat_generators:
                 for series in heat_generator.data:
-                    series.skip_data_update = not _is_heating_electricity(series)
+                    series.skip_data_update = (
+                        not _catalog_requests_heating_electricity(series)
+                    )
                 async for series in self.api.get_data_by_device(
                     heat_generator, DeviceDataBucketResolution.HOUR, start, end
                 ):

@@ -369,7 +369,7 @@ async def test_reading_is_energy_in_kilowatt_hours_without_hourly_statistics(
     state = hass.states.get(_hasslant_entities(hass)[0].entity_id)
     assert state.attributes["unit_of_measurement"] == "kWh"
     assert state.attributes["device_class"] == "energy"
-    assert "state_class" not in state.attributes
+    assert state.attributes["state_class"] == "total_increasing"
     assert write_statistics.call_count == 0
 
 

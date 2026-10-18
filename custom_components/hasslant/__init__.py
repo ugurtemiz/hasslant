@@ -37,5 +37,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload one myVAILLANT account."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     stored = hass.data[DOMAIN].pop(entry.entry_id)
+    await stored["coordinator"].async_shutdown()
     await stored["api"].aclose()
     return unloaded

@@ -155,6 +155,13 @@ def _advance_home_clock(hass, freezer, moment: datetime) -> None:
     async_fire_time_changed(hass)
 
 
+async def _refresh(hass) -> None:
+    """Run another fetch for the account already set up."""
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    await hass.data[DOMAIN][entry.entry_id]["coordinator"].async_refresh()
+    await hass.async_block_till_done()
+
+
 async def test_valid_myvaillant_account_creates_a_hasslant_setup(hass):
     account = MyVaillantAccount()
     with patch("custom_components.hasslant.account.open_account", account):
@@ -1277,3 +1284,51 @@ async def test_no_reading_when_no_heat_generator_lists_heating_electricity(
     )
 
     assert _hasslant_entities(hass) == []
+
+
+async def test_reading_appears_when_a_heat_generator_gains_heating_electricity(
+    hass, freezer
+):
+    """No reading until a heat generator lists heating electricity.
+
+    The next refresh is the first time that series is there, and no closed
+    hour has a figure yet, so the reading exists and is unavailable. A failed
+    refresh does not remove it, and neither does a later refresh while the
+    series is still present.
+    """
+    freezer.move_to("2026-10-18T14:20:00+02:00")
+    midnight = datetime(2026, 10, 18, tzinfo=HOME_TZ)
+    hour = timedelta(hours=1)
+    in_progress = midnight + timedelta(hours=14)
+    primary = _device(
+        "primary_heat_generator",
+        [_series("HEATING", "HEAT_GENERATED")],
+    )
+    account = MyVaillantAccount(homes=[_home([primary])])
+    await _add_hasslant(hass, account)
+    assert _hasslant_entities(hass) == []
+
+    primary.data = [
+        _heating_electricity([_bucket(in_progress, in_progress + hour, 1540)])
+    ]
+    await _refresh(hass)
+
+    entities = _hasslant_entities(hass)
+    assert len(entities) == 1
+    state = hass.states.get(entities[0].entity_id)
+    assert state.name == "Oak House Consumed electrical energy heating"
+    assert state.state == STATE_UNAVAILABLE
+
+    account.fail_refresh = True
+    await _refresh(hass)
+    assert [entity.entity_id for entity in _hasslant_entities(hass)] == [
+        entities[0].entity_id
+    ]
+    assert hass.states.get(entities[0].entity_id).state == STATE_UNAVAILABLE
+
+    account.fail_refresh = False
+    await _refresh(hass)
+    assert [entity.entity_id for entity in _hasslant_entities(hass)] == [
+        entities[0].entity_id
+    ]
+    assert hass.states.get(entities[0].entity_id).state == STATE_UNAVAILABLE

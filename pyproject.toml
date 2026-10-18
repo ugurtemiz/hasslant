@@ -1,0 +1,28 @@
+[project]
+name = "hasslant"
+version = "0.1.0"
+requires-python = ">=3.14.2"
+dependencies = [
+    "myPyllant==0.9.18",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-homeassistant-custom-component==0.13.338",
+    "pytest",
+    "pytest-asyncio",
+    "freezegun",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "--strict-markers"
+filterwarnings = [
+    "ignore:Inheritance class CountingClientSession from ClientSession is discouraged:DeprecationWarning",
+    "ignore:'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16:DeprecationWarning",
+]
+
+[tool.uv]
+package = false

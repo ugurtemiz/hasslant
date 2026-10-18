@@ -96,33 +96,40 @@ class HeatingDataCoordinator(DataUpdateCoordinator[list[HomeReading]]):
         self._quarter_unsubs.clear()
         await super().async_shutdown()
 
-    def _schedule_midnight(self, system_id: str, timezone) -> None:
-        """Withdraw yesterday's day total at midnight in the home's timezone."""
-        previous = self._midnight_unsubs.pop(system_id, None)
+    def _schedule_next(
+        self, unsubs: dict[str, Any], system_id: str, when: datetime, action
+    ) -> None:
+        """Register ``action`` at ``when``, replacing this home's previous listener."""
+        previous = unsubs.pop(system_id, None)
         if previous is not None:
             previous()
-        when = _next_midnight(datetime.now(timezone))
+        unsubs[system_id] = async_track_point_in_utc_time(self.hass, action, when)
+
+    def _schedule_midnight(self, system_id: str, timezone) -> None:
+        """Withdraw yesterday's day total at midnight in the home's timezone."""
 
         @callback
         def _on_midnight(_utc_now: datetime) -> None:
             self._withdraw_day_total(system_id)
 
-        self._midnight_unsubs[system_id] = async_track_point_in_utc_time(
-            self.hass, _on_midnight, when
+        self._schedule_next(
+            self._midnight_unsubs,
+            system_id,
+            _next_midnight(datetime.now(timezone)),
+            _on_midnight,
         )
 
     def _schedule_quarter_past(self, system_id: str, timezone) -> None:
         """Refresh about 15 minutes after each hour closes, on the home's clock."""
-        previous = self._quarter_unsubs.pop(system_id, None)
-        if previous is not None:
-            previous()
-        when = _next_quarter_past(datetime.now(timezone))
 
         async def _on_quarter_past(_utc_now: datetime) -> None:
             await self._refresh_home(system_id)
 
-        self._quarter_unsubs[system_id] = async_track_point_in_utc_time(
-            self.hass, _on_quarter_past, when
+        self._schedule_next(
+            self._quarter_unsubs,
+            system_id,
+            _next_quarter_past(datetime.now(timezone)),
+            _on_quarter_past,
         )
 
     @callback

@@ -21,6 +21,8 @@ from homeassistant.loader import async_get_integration
 from myPyllant.http_client import AuthenticationFailed
 from myPyllant.models import DeviceData, DeviceDataBucket
 
+from custom_components.hasslant.account import _Account
+
 DOMAIN = "hasslant"
 EMAIL = "owner@example.com"
 PASSWORD = "secret"
@@ -1332,3 +1334,149 @@ async def test_reading_appears_when_a_heat_generator_gains_heating_electricity(
         entities[0].entity_id
     ]
     assert hass.states.get(entities[0].entity_id).state == STATE_UNAVAILABLE
+
+
+class _ExpiringSignIn:
+    """myVAILLANT account whose access token dies before the next closed hour.
+
+    The real account's access token expires inside an hour. Fetches after that
+    fail, and the day total stays on the last figure the token could fetch.
+    """
+
+    def __init__(self, homes, *, refresh_fails: bool = False):
+        self.homes = list(homes)
+        self.refresh_fails = refresh_fails
+        self.aiohttp_session = SimpleNamespace(closed=True)
+        self.oauth_session: dict = {}
+        self.oauth_session_expires = None
+        self.logins = 0
+        self.refreshes = 0
+
+    def __call__(self, username, password, brand, country=None):
+        return _Account(self)
+
+    async def login(self):
+        self.logins += 1
+        self._grant()
+
+    async def refresh_token(self):
+        self.refreshes += 1
+        if self.refresh_fails:
+            raise RuntimeError("refresh rejected")
+        self._grant()
+
+    def _grant(self):
+        self.oauth_session = {"refresh_token": "refresh-token", "expires_in": 1800}
+        self.oauth_session_expires = datetime.now(timezone.utc) + timedelta(minutes=30)
+
+    def _require_access_token(self):
+        expires = self.oauth_session_expires
+        if expires is None or expires <= datetime.now(timezone.utc):
+            raise RuntimeError("access token expired")
+
+    async def get_systems(self):
+        self._require_access_token()
+        for home in self.homes:
+            yield home
+
+    async def get_data_by_device(self, device, resolution, start, end):
+        self._require_access_token()
+        for series in device.data:
+            if getattr(series, "skip_data_update", False):
+                continue
+            yield DeviceData(
+                operation_mode=series.operation_mode,
+                energy_type=series.value_type,
+                data=list(series.fetched_buckets),
+            )
+
+
+@pytest.mark.freeze_time("2026-10-19T02:20:00+02:00")
+async def test_later_closed_hour_is_published_after_the_account_sign_in_expires(
+    hass, freezer
+):
+    """15 Wh at 02:15, then the access token dies. The 04:00 hour is still published.
+
+    The app already shows that later hour. A fetch that keeps the expired token
+    leaves the day total on 0.015.
+    """
+    await hass.config.async_set_time_zone("America/New_York")
+    midnight = datetime(2026, 10, 19, tzinfo=HOME_TZ)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(
+                        midnight + timedelta(hours=1),
+                        midnight + timedelta(hours=2),
+                        15,
+                    ),
+                    _bucket(
+                        midnight + timedelta(hours=4),
+                        midnight + timedelta(hours=5),
+                        1600,
+                    ),
+                    _bucket(
+                        midnight + timedelta(hours=5),
+                        midnight + timedelta(hours=6),
+                        340,
+                    ),
+                ]
+            )
+        ],
+    )
+    account = _ExpiringSignIn([_home([primary])])
+    await _add_hasslant(hass, account)
+    entity_id = _hasslant_entities(hass)[0].entity_id
+    assert hass.states.get(entity_id).state == "0.015"
+    logins_after_setup = account.logins
+    assert logins_after_setup >= 1
+    assert account.refreshes == 0
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 19, 5, 15, tzinfo=HOME_TZ))
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "1.615"
+    assert account.refreshes == 1
+    assert account.logins == logins_after_setup
+
+
+@pytest.mark.freeze_time("2026-10-19T02:20:00+02:00")
+async def test_rejected_session_refresh_signs_in_again_before_the_next_hour(
+    hass, freezer
+):
+    """A rejected refresh does not freeze the day total. The account signs in again."""
+    await hass.config.async_set_time_zone("America/New_York")
+    midnight = datetime(2026, 10, 19, tzinfo=HOME_TZ)
+    primary = _device(
+        "primary_heat_generator",
+        [
+            _heating_electricity(
+                [
+                    _bucket(
+                        midnight + timedelta(hours=1),
+                        midnight + timedelta(hours=2),
+                        15,
+                    ),
+                    _bucket(
+                        midnight + timedelta(hours=4),
+                        midnight + timedelta(hours=5),
+                        1600,
+                    ),
+                ]
+            )
+        ],
+    )
+    account = _ExpiringSignIn([_home([primary])], refresh_fails=True)
+    await _add_hasslant(hass, account)
+    entity_id = _hasslant_entities(hass)[0].entity_id
+    assert hass.states.get(entity_id).state == "0.015"
+    logins_after_setup = account.logins
+
+    _advance_home_clock(hass, freezer, datetime(2026, 10, 19, 5, 15, tzinfo=HOME_TZ))
+    await hass.async_block_till_done()
+
+    assert hass.states.get(entity_id).state == "1.615"
+    assert account.refreshes == 1
+    assert account.logins == logins_after_setup + 1
